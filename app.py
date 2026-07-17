@@ -29,15 +29,14 @@ def format_timestamp(seconds):
 
 # --- Core Logic Functions ---
 def download_youtube_video(video_url, destination_dir, cookie_path=None):
-    # Fetching at 480p or 720p is perfect for slide capture, runs faster, and saves cloud memory!
+    # Fixed format selector: Falls back to best MP4 if the exact constraints aren't available
     ydl_opts = {
-        'format': 'best[height<=720][ext=mp4]/best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': os.path.join(destination_dir, 'input_video.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
     }
     
-    # If a cookies file is uploaded, use it to bypass cloud IP blocks
     if cookie_path:
         ydl_opts['cookiefile'] = cookie_path
         
@@ -50,11 +49,17 @@ def fetch_transcript(video_url):
     if not video_id:
         return "Error: Invalid YouTube URL."
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # Fixed: Instantiate the API class to support the latest library versions
+        # This resolves: "type object 'YouTubeTranscriptApi' has no attribute 'list_transcripts'"
+        api_instance = YouTubeTranscriptApi()
+        
         priority_languages = ['hi-Latn', 'hi', 'en', 'en-IN']
         try:
+            transcript_list = api_instance.list(video_id)
             transcript = transcript_list.find_transcript(priority_languages)
         except Exception:
+            # Fallback to whatever default transcript is present
+            transcript_list = api_instance.list(video_id)
             transcript = transcript_list.find_default_transcript()
         
         transcript_data = transcript.fetch()
@@ -69,7 +74,7 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
 
     video_fps = cap.get(cv2.CAP_PROP_FPS)
     if video_fps <= 0:
-        video_fps = 30.0  # Fallback
+        video_fps = 30.0
         
     frame_interval = max(1, round(video_fps))
     
@@ -134,7 +139,7 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
         frame_count += 1
         if total_frames > 0:
             progress_bar.progress(min(1.0, frame_count / total_frames))
-            status_text.text(f"Processing frame timestamp: {timestamp_str} | Captured Slides: {extracted_count}")
+            status_text.text(f"Processing timestamp: {timestamp_str} | Captured Slides: {extracted_count}")
 
     cap.release()
     progress_bar.empty()
@@ -144,7 +149,7 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
         temp_img_dir.cleanup()
         return False, "No unique slides found based on your threshold settings."
 
-    # Memory Efficient PDF Compilation using FPDF
+    # Compile PDF
     pdf = FPDF()
     for img_path in saved_frame_paths:
         with Image.open(img_path) as img:
@@ -177,7 +182,7 @@ if url_input:
                 with open(cookie_path, "wb") as f:
                     f.write(cookie_file.getbuffer())
             
-            # 1. Process and Fetch Transcript
+            # 1. Process Transcript
             st.subheader("📝 Transcript Result")
             with st.spinner("Fetching transcript..."):
                 transcript_text = fetch_transcript(url_input)
@@ -190,7 +195,7 @@ if url_input:
             
             st.markdown("---")
             
-            # 2. Process and Fetch Slides
+            # 2. Process Slides
             st.subheader("🖼️ Visual Slide Extraction")
             try:
                 with st.spinner("Downloading video content securely..."):
