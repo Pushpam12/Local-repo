@@ -7,6 +7,7 @@ import streamlit as st
 from PIL import Image
 from fpdf import FPDF
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
 
 # --- UI Setup ---
 st.set_page_config(page_title="YouTube Note Takeaway", page_icon="📹", layout="centered")
@@ -29,9 +30,9 @@ def format_timestamp(seconds):
 
 # --- Core Logic Functions ---
 def download_youtube_video(video_url, destination_dir, cookie_path=None):
-    # Fixed format selector: Falls back to best MP4 if the exact constraints aren't available
+    # This selector fetches mp4 specifically up to 720p, fallback to best overall if not found.
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': os.path.join(destination_dir, 'input_video.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
@@ -44,28 +45,45 @@ def download_youtube_video(video_url, destination_dir, cookie_path=None):
         info = ydl.extract_info(video_url, download=True)
         return ydl.prepare_filename(info)
 
-def fetch_transcript(video_url):
+def fetch_transcript_with_proxy(video_url, proxy_type=None, proxy_user=None, proxy_pass=None, proxy_http=None, proxy_https=None):
     video_id = extract_video_id(video_url)
     if not video_id:
         return "Error: Invalid YouTube URL."
+    
     try:
-        # Fixed: Instantiate the API class to support the latest library versions
-        # This resolves: "type object 'YouTubeTranscriptApi' has no attribute 'list_transcripts'"
-        api_instance = YouTubeTranscriptApi()
+        proxy_config = None
         
+        # Configure the proxy if inputs are provided in the Advanced tab
+        if proxy_type == "Webshare" and proxy_user and proxy_pass:
+            proxy_config = WebshareProxyConfig(
+                proxy_username=proxy_user,
+                proxy_password=proxy_pass
+            )
+        elif proxy_type == "Generic HTTP/S" and (proxy_http or proxy_https):
+            proxy_config = GenericProxyConfig(
+                http_url=proxy_http if proxy_http else None,
+                https_url=proxy_https if proxy_https else None
+            )
+
+        # Correct instantiation to support the latest library APIs
+        if proxy_config:
+            api_instance = YouTubeTranscriptApi(proxy_config=proxy_config)
+        else:
+            api_instance = YouTubeTranscriptApi()
+            
         priority_languages = ['hi-Latn', 'hi', 'en', 'en-IN']
         try:
             transcript_list = api_instance.list(video_id)
             transcript = transcript_list.find_transcript(priority_languages)
         except Exception:
-            # Fallback to whatever default transcript is present
             transcript_list = api_instance.list(video_id)
             transcript = transcript_list.find_default_transcript()
         
         transcript_data = transcript.fetch()
         return "\n".join([entry['text'].replace('\n', ' ') for entry in transcript_data])
     except Exception as e:
-        return f"Could not fetch transcript. (Captions might be disabled or IP blocked).\nDetails: {e}"
+        return (f"Could not fetch transcript. (Captions might be disabled or Cloud IP is blocked).\n"
+                f"Details: {e}")
 
 def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
     cap = cv2.VideoCapture(video_path)
@@ -102,7 +120,7 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
         current_second = frame_count / video_fps
         timestamp_str = format_timestamp(current_second)
 
-        # Fingerprint logic
+        # Slide change fingerprint check
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         small = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
         blurred = cv2.GaussianBlur(small, (5, 5), 0)
@@ -139,7 +157,7 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
         frame_count += 1
         if total_frames > 0:
             progress_bar.progress(min(1.0, frame_count / total_frames))
-            status_text.text(f"Processing timestamp: {timestamp_str} | Captured Slides: {extracted_count}")
+            status_text.text(f"Processing frame timestamp: {timestamp_str} | Captured Slides: {extracted_count}")
 
     cap.release()
     progress_bar.empty()
@@ -149,7 +167,7 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
         temp_img_dir.cleanup()
         return False, "No unique slides found based on your threshold settings."
 
-    # Compile PDF
+    # Dynamic Page Layout with FPDF (highly memory-efficient)
     pdf = FPDF()
     for img_path in saved_frame_paths:
         with Image.open(img_path) as img:
@@ -165,13 +183,29 @@ def extract_slides_to_pdf(video_path, output_pdf_path, threshold, jpeg_quality):
 # --- UI Layout ---
 url_input = st.text_input("Enter YouTube Video URL:", placeholder="https://www.youtube.com/watch?v=...")
 
-with st.expander("⚙️ Advanced Settings"):
+with st.sidebar:
+    st.header("⚙️ Slide Settings")
     threshold = st.slider("Slide Sensitivity (Higher = fewer duplicates captured)", 1.0, 10.0, 3.0, 0.5)
-    jpeg_quality = st.slider("JPEG Quality (Higher = crisper slides, larger PDF size)", 50, 100, 80, 5)
+    jpeg_quality = st.slider("JPEG Quality (Higher = crispier slides, larger PDF size)", 50, 100, 80, 5)
     
     st.markdown("---")
-    st.markdown("**🛡️ Cloud IP-Bypass Options**")
-    cookie_file = st.file_uploader("Upload your cookies.txt (Use this only if you get blocked/403 errors)", type=["txt"])
+    st.header("🛡️ Cloud IP-Bypass Options")
+    st.markdown("If the cloud provider's IP gets blocked by YouTube, use the parameters below:")
+    
+    cookie_file = st.file_uploader("Upload cookies.txt file", type=["txt"])
+    
+    st.markdown("**Proxy Settings**")
+    p_type = st.selectbox("Proxy Config Type", ["None", "Webshare", "Generic HTTP/S"])
+    
+    p_user, p_pass = None, None
+    p_http, p_https = None, None
+    
+    if p_type == "Webshare":
+        p_user = st.text_input("Webshare Username")
+        p_pass = st.text_input("Webshare Password", type="password")
+    elif p_type == "Generic HTTP/S":
+        p_http = st.text_input("HTTP Proxy URL (e.g., http://user:pass@host:port)")
+        p_https = st.text_input("HTTPS Proxy URL (e.g., https://user:pass@host:port)")
 
 if url_input:
     if st.button("Process Video", type="primary"):
@@ -182,28 +216,36 @@ if url_input:
                 with open(cookie_path, "wb") as f:
                     f.write(cookie_file.getbuffer())
             
-            # 1. Process Transcript
+            # 1. Process and Fetch Transcript
             st.subheader("📝 Transcript Result")
             with st.spinner("Fetching transcript..."):
-                transcript_text = fetch_transcript(url_input)
+                transcript_text = fetch_transcript_with_proxy(
+                    url_input, 
+                    proxy_type=p_type, 
+                    proxy_user=p_user, 
+                    proxy_pass=p_pass, 
+                    proxy_http=p_http, 
+                    proxy_https=p_https
+                )
                 
             if "Error" not in transcript_text and "Could not fetch" not in transcript_text:
                 st.success("Transcript compiled successfully!")
                 st.download_button("📥 Download Transcript (.txt)", data=transcript_text, file_name="transcript.txt", mime="text/plain")
             else:
                 st.warning(transcript_text)
+                st.info("💡 Tip: If you are seeing an IP Block error, toggle the 'Cloud IP-Bypass Options' in the sidebar.")
             
             st.markdown("---")
             
-            # 2. Process Slides
+            # 2. Process and Fetch Slides
             st.subheader("🖼️ Visual Slide Extraction")
             try:
-                with st.spinner("Downloading video content securely..."):
+                with st.spinner("Downloading video content (Hold tight)..."):
                     video_file_path = download_youtube_video(url_input, tmpdir, cookie_path)
                 
                 pdf_output_path = os.path.join(tmpdir, "extracted_slides.pdf")
                 
-                with st.spinner("Analyzing frame shifts and compiling PDF..."):
+                with st.spinner("Analyzing frames and writing PDF pages..."):
                     success, message = extract_slides_to_pdf(video_file_path, pdf_output_path, threshold, jpeg_quality)
                 
                 if success:
@@ -214,4 +256,4 @@ if url_input:
                     st.error(message)
                     
             except Exception as e:
-                st.error(f"An error occurred: {e}\n(Tip: If this is a 403 / Sign in error, export a cookies.txt from your browser and upload it in the Advanced Settings.)")
+                st.error(f"An error occurred: {e}")
